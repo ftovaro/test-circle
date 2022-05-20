@@ -1,0 +1,101 @@
+version: 2.1 # Use 2.1 to enable using orbs and other features.
+
+# Declare the orbs that we'll use in our config.
+# read more about orbs: https://circleci.com/docs/2.0/orb-intro/
+orbs:
+  ruby: circleci/ruby@1.0
+  node: circleci/node@2
+
+jobs:
+  build: # our first job, named "build"
+    docker:
+      - image: cimg/ruby:2.7.2-node # use a tailored CircleCI docker image.
+        auth:
+          username: mydockerhub-user
+          password: $DOCKERHUB_PASSWORD  # context / project UI env-var reference
+    steps:
+      - checkout # pull down our git code.
+      - ruby/install-deps # use the ruby orb to install dependencies
+      # use the node orb to install our packages
+      # specifying that we use `yarn` and to cache dependencies with `yarn.lock`
+      # learn more: https://circleci.com/docs/2.0/caching/
+      - node/install-packages:
+          pkg-manager: yarn
+          cache-key: "yarn.lock"
+
+  test:  # our next job, called "test"
+    # we run "parallel job containers" to enable speeding up our tests;
+    # this splits our tests across multiple containers.
+    parallelism: 3
+    # here we set TWO docker images.
+    docker:
+      - image: cimg/ruby:2.7.2-node # this is our primary docker image, where step commands run.
+        auth:
+          username: mydockerhub-user
+          password: $DOCKERHUB_PASSWORD  # context / project UI env-var reference
+      - image: cimg/mysql:5.7
+        auth:
+          username: mydockerhub-user
+          password: $DOCKERHUB_PASSWORD  # context / project UI env-var reference
+        environment: # add POSTGRES environment variables.
+          MYSQL_ROOT_PASSWORD: rails
+          MYSQL_DATABASE: test_circle_test
+#          MYSQL_USER: user
+#          MYSQL_PASSWORD: rails
+    # environment variables specific to Ruby/Rails, applied to the primary container.
+#    environment:
+#      BUNDLE_JOBS: "3"
+#      BUNDLE_RETRY: "3"
+#      MYSQL_HOST: 127.0.0.1
+#      MYSQL_USER: circleci-demo-ruby
+#      MYSQL_PASSWORD: ""
+#      RAILS_ENV: test
+    # A series of steps to run, some are similar to those in "build".
+    steps:
+      - checkout
+      - ruby/install-deps
+      - node/install-packages:
+          pkg-manager: yarn
+          cache-key: "yarn.lock"
+      - run:
+          # Our primary container isn't MYSQL so run a sleep command until it's ready.
+          name: Waiting for MySQL to be ready
+          command: |
+            for i in `seq 1 10`;
+            do
+              nc -z 127.0.0.1 3306 && echo Success && exit 0
+              echo -n .
+              sleep 1
+            done
+            echo Failed waiting for MySQL && exit 1
+      # Here we make sure that the secondary container boots
+      # up before we run operations on the database.
+      - run:
+          name: Wait for DB
+          command: dockerize -wait tcp://127.0.0.1:3306 -timeout 120s
+      - run:
+          name: Sleep
+          command: sleep 2
+      - run:
+          name: Setup DB
+          command: mysql_config |grep -- --socket
+      - run:
+          name: Setup DB
+          command: bundle exec rails db:create db:schema:load --trace
+#      - run:
+#          name: Database setup
+#          command: |
+#            bundle exec rails db:create
+#            bundle exec rails db:schema:load --trace
+#      # Run rspec in parallel
+      - ruby/rspec-test
+
+# We use workflows to orchestrate the jobs that we declared above.
+workflows:
+  version: 2
+  build_and_test:     # The name of our workflow is "build_and_test"
+    jobs:             # The list of jobs we run as part of this workflow.
+      - build         # Run build first.
+      - test:         # Then run test,
+          requires:   # Test requires that build passes for it to run.
+            - build   # Finally, run the build job.
